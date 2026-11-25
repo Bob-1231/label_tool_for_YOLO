@@ -225,16 +225,20 @@ class YoloDesk(tk.Tk):
         self._heading(right, "本張標註", "OBJECTS", color="#147a69", background="#e2f3ee")
         object_frame = tk.Frame(right, background=PANEL)
         object_frame.pack(fill="both", expand=True, padx=10)
-        self.object_tree = ttk.Treeview(object_frame, columns=("id", "name"), show="headings", selectmode="browse", height=6)
+        self.object_tree = ttk.Treeview(object_frame, columns=("id", "name", "locked", "hidden"), show="headings", selectmode="browse", height=6)
         self.object_tree.heading("id", text="#")
         self.object_tree.heading("name", text="類別")
-        self.object_tree.column("id", width=36, minwidth=30, stretch=False, anchor="center")
-        self.object_tree.column("name", width=174, minwidth=90, stretch=True)
+        self.object_tree.column("id", width=28, minwidth=24, stretch=False, anchor="center")
+        self.object_tree.column("name", width=110, minwidth=60, stretch=True)
+        for column, title in (("locked", "固定"), ("hidden", "隱藏")):
+            self.object_tree.heading(column, text=title)
+            self.object_tree.column(column, width=46, minwidth=46, stretch=False, anchor="center")
         object_scroll = ttk.Scrollbar(object_frame, orient="vertical", command=self.object_tree.yview)
         self.object_tree.configure(yscrollcommand=object_scroll.set)
         self.object_tree.pack(side="left", fill="both", expand=True)
         object_scroll.pack(side="right", fill="y")
         self.object_tree.bind("<<TreeviewSelect>>", self._object_selected)
+        self.object_tree.bind("<Button-1>", self._object_control_clicked)
         self.object_tree.tag_configure("row-even", background="#ffffff")
         self.object_tree.tag_configure("row-odd", background="#f0f5fc")
         object_actions = tk.Frame(right, background=PANEL)
@@ -649,7 +653,7 @@ class YoloDesk(tk.Tk):
         self._update_dirty()
 
     def delete_selected(self):
-        if self._editable() and 0 <= self.canvas.selected < len(self.canvas.annotations):
+        if self._editable() and self.canvas.can_select(self.canvas.selected):
             self.canvas.cancel()
             before = copy.deepcopy(self.canvas.annotations)
             del self.canvas.annotations[self.canvas.selected]
@@ -713,7 +717,7 @@ class YoloDesk(tk.Tk):
         if 0 <= index < len(self._class_ids):
             self.class_combo.current(index)
             self._class_selected()
-            if (self._editable() and 0 <= self.canvas.selected < len(self.canvas.annotations)
+            if (self._editable() and self.canvas.can_select(self.canvas.selected)
                     and not self.canvas._drag and not self.canvas._polygon):
                 self.apply_class()
                 self.set_status(f"已將選取框改為：{self.class_combo.get()}")
@@ -748,15 +752,42 @@ class YoloDesk(tk.Tk):
             self._update_dirty()
 
     def apply_class(self):
-        if not self._editable() or not self._class_ids or not 0 <= self.canvas.selected < len(self.canvas.annotations):
+        if not self._editable() or not self._class_ids or not self.canvas.can_select(self.canvas.selected):
             return
         before = copy.deepcopy(self.canvas.annotations)
         self.canvas.annotations[self.canvas.selected].class_id = self.canvas.current_class
+        if not self.canvas.can_select(self.canvas.selected):
+            self.canvas.selected = -1
         if before != self.canvas.annotations:
             self._changed(before)
             self.canvas.redraw()
 
+    def _object_control_clicked(self, event):
+        tree = self.object_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        column = tree.identify_column(event.x)
+        row = tree.identify_row(event.y)
+        if not row or column not in {"#3", "#4"}:
+            return
+        if self.busy or self.canvas._drag or self.canvas._polygon:
+            return "break"
+        class_id = self.canvas.annotations[int(row)].class_id
+        classes = self.canvas.locked_classes if column == "#3" else self.canvas.hidden_classes
+        classes.symmetric_difference_update({class_id})
+        if not self.canvas.can_select(self.canvas.selected):
+            self.canvas.selected = -1
+        for i, annotation in enumerate(self.canvas.annotations):
+            if annotation.class_id == class_id:
+                tree.set(str(i), column, "☑" if class_id in classes else "☐")
+        self._selected(self.canvas.selected)
+        self.canvas.redraw()
+        return "break"
+
     def refresh_objects(self):
+        present = {annotation.class_id for annotation in self.canvas.annotations}
+        self.canvas.locked_classes.intersection_update(present)
+        self.canvas.hidden_classes.intersection_update(present)
         self._refreshing_objects = True
         items = self.object_tree.get_children()
         if items:
@@ -766,7 +797,10 @@ class YoloDesk(tk.Tk):
             tag = f"class{annotation.class_id}"
             self.object_tree.tag_configure(tag, foreground=LIST_COLORS[annotation.class_id % len(LIST_COLORS)])
             row_tag = "row-even" if i % 2 == 0 else "row-odd"
-            self.object_tree.insert("", "end", iid=str(i), values=(i + 1, f"{annotation.class_id} · {name}"), tags=(row_tag, tag))
+            locked = "☑" if annotation.class_id in self.canvas.locked_classes else "☐"
+            hidden = "☑" if annotation.class_id in self.canvas.hidden_classes else "☐"
+            self.object_tree.insert("", "end", iid=str(i), values=(i + 1, f"{annotation.class_id} · {name}", locked, hidden),
+                                    tags=(row_tag, tag))
         self._refreshing_objects = False
         self._selected(self.canvas.selected)
 
@@ -792,7 +826,10 @@ class YoloDesk(tk.Tk):
         selected = self.object_tree.selection()
         if selected:
             index = int(selected[0])
-            if index != self.canvas.selected and index < len(self.canvas.annotations):
+            if not self.canvas.can_select(index):
+                self._selected(self.canvas.selected)
+                return
+            if index != self.canvas.selected:
                 self.canvas.selected = index
                 self._selected(index)
                 self.canvas.redraw()
@@ -881,6 +918,8 @@ class YoloDesk(tk.Tk):
             "標註操作\n\n"
             "B：畫框；V：選取；拖曳框：移動；拖曳角點/邊點：調整大小。\n"
             "矩形框模式下點擊既有框內部，會自動切換選取並可直接拖曳調整。\n"
+            "在「本張標註」勾選「固定」可保留框線並穿過它畫框，勾選「隱藏」可收起框線和名稱。\n"
+            "兩個開關各自套用到本張同類別的所有物件，再點一次即可解除。切換圖片或重新載入會重設。\n"
             "A / D 或左右鍵：上一張 / 下一張；F：圖片適合視窗。\n"
             "滾輪：以游標為中心縮放；右鍵 / 中鍵 / 空白鍵＋拖曳：平移。\n"
             "1–9：依列表順序選擇前九個類別；已有選取框時直接修改該框類別，可復原。\n"

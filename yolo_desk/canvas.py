@@ -29,6 +29,8 @@ class AnnotationCanvas(tk.Canvas):
         self.scale, self.ox, self.oy = 1.0, 0.0, 0.0
         self.show_labels = True
         self.show_annotations = True
+        self.locked_classes: set[int] = set()
+        self.hidden_classes: set[int] = set()
         self._photo = None
         self._image_key = None
         self._drag = None
@@ -70,6 +72,8 @@ class AnnotationCanvas(tk.Canvas):
 
     def set_image(self, source: Image.Image | None, annotations: list[Annotation]) -> None:
         self.cancel()
+        self.locked_classes.clear()
+        self.hidden_classes.clear()
         self.source = source
         self.annotations = annotations
         self.selected = -1
@@ -115,8 +119,14 @@ class AnnotationCanvas(tk.Canvas):
         xm, ym = (x1 + x2) / 2, (y1 + y2) / 2
         return [(x1, y1), (xm, y1), (x2, y1), (x2, ym), (x2, y2), (xm, y2), (x1, y2), (x1, ym)]
 
+    def can_select(self, index: int) -> bool:
+        if not 0 <= index < len(self.annotations):
+            return False
+        class_id = self.annotations[index].class_id
+        return class_id not in self.locked_classes and class_id not in self.hidden_classes
+
     def _hit_handle(self, x: float, y: float) -> int:
-        if 0 <= self.selected < len(self.annotations):
+        if self.can_select(self.selected):
             for i, point in enumerate(self._handles(self.annotations[self.selected])):
                 px, py = self.screen(point)
                 if abs(x - px) <= 8 and abs(y - py) <= 8:
@@ -149,24 +159,26 @@ class AnnotationCanvas(tk.Canvas):
             return
         point = self.normalized(event.x, event.y)
         raw = self.normalized(event.x, event.y, False)
-        if self.tool == "box" and (
-            self._hit_handle(event.x, event.y) >= 0
-            or any(self._contains(annotation, raw) for annotation in self.annotations)
-        ):
-            # Reuse selection/drag behavior for the same press, without adding a box.
-            self.set_tool("select")
-        if self.tool == "select":
+        if self.tool in {"select", "box"}:
             handle = self._hit_handle(event.x, event.y)
+            hit = next((i for i in reversed(range(len(self.annotations)))
+                        if self.can_select(i) and self._contains(self.annotations[i], raw)), -1)
+            if self.tool == "box" and (handle >= 0 or hit >= 0):
+                self.set_tool("select")
+        if self.tool == "select":
             if handle >= 0:
                 self._before = copy.deepcopy(self.annotations)
                 self._drag = ("handle", handle, point)
                 return
-            self.selected = next((i for i in reversed(range(len(self.annotations))) if self._contains(self.annotations[i], raw)), -1)
+            self.selected = hit
             self.on_select(self.selected)
             if self.selected >= 0:
                 self._before = copy.deepcopy(self.annotations)
                 self._drag = ("move", point)
         elif all(0 <= v <= 1 for v in raw):
+            if self.current_class in self.hidden_classes:
+                self.on_status("目前繪製類別已隱藏，請在「本張標註」取消隱藏，或選擇其他類別")
+                return
             if self.tool == "box":
                 self._before = copy.deepcopy(self.annotations)
                 self._drag = ("box", point, point)
@@ -232,7 +244,7 @@ class AnnotationCanvas(tk.Canvas):
                     (min(first[0], last[0]), min(first[1], last[1])),
                     (max(first[0], last[0]), max(first[1], last[1])),
                 ]))
-                self.selected = len(self.annotations) - 1
+                self.selected = len(self.annotations) - 1 if self.current_class not in self.locked_classes else -1
         before = self._before
         self._drag, self._before = None, None
         if mode != "pan" and before is not None and before != self.annotations:
@@ -267,7 +279,7 @@ class AnnotationCanvas(tk.Canvas):
             self.on_status("多邊形面積為 0，請重新選取頂點")
             return
         self.annotations.append(annotation)
-        self.selected = len(self.annotations) - 1
+        self.selected = len(self.annotations) - 1 if self.current_class not in self.locked_classes else -1
         self._polygon, self._preview = [], None
         self.on_change(before)
         self.on_select(self.selected)
@@ -308,6 +320,8 @@ class AnnotationCanvas(tk.Canvas):
         if not self.show_annotations:
             return
         for index, annotation in enumerate(self.annotations):
+            if annotation.class_id in self.hidden_classes:
+                continue
             color = COLORS[annotation.class_id % len(COLORS)]
             selected = index == self.selected
             points = [self.screen(point) for point in annotation.points]
