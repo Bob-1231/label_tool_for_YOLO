@@ -24,16 +24,18 @@ class AnnotationCanvas(tk.Canvas):
         self.names: dict[int, str] = {}
         self.current_class = 0
         self.selected = -1
+        self.hovered = -1
         self.tool = "select"
         self.readonly = False
         self.scale, self.ox, self.oy = 1.0, 0.0, 0.0
         self.show_labels = True
         self.show_annotations = True
-        self.locked_classes: set[int] = set()
-        self.hidden_classes: set[int] = set()
+        self.locked_ids: set[int] = set()
+        self.hidden_ids: set[int] = set()
         self._photo = None
         self._image_key = None
         self._drag = None
+        self._selected_items = None
         self._before: list[Annotation] | None = None
         self._polygon: list[tuple[float, float]] = []
         self._preview = None
@@ -72,11 +74,12 @@ class AnnotationCanvas(tk.Canvas):
 
     def set_image(self, source: Image.Image | None, annotations: list[Annotation]) -> None:
         self.cancel()
-        self.locked_classes.clear()
-        self.hidden_classes.clear()
+        self.locked_ids.clear()
+        self.hidden_ids.clear()
         self.source = source
         self.annotations = annotations
         self.selected = -1
+        self.hovered = -1
         self._image_key = None
         self.fit()
 
@@ -122,8 +125,8 @@ class AnnotationCanvas(tk.Canvas):
     def can_select(self, index: int) -> bool:
         if not 0 <= index < len(self.annotations):
             return False
-        class_id = self.annotations[index].class_id
-        return class_id not in self.locked_classes and class_id not in self.hidden_classes
+        edit_id = self.annotations[index].edit_id
+        return edit_id not in self.locked_ids and edit_id not in self.hidden_ids
 
     def _hit_handle(self, x: float, y: float) -> int:
         if self.can_select(self.selected):
@@ -176,9 +179,6 @@ class AnnotationCanvas(tk.Canvas):
                 self._before = copy.deepcopy(self.annotations)
                 self._drag = ("move", point)
         elif all(0 <= v <= 1 for v in raw):
-            if self.current_class in self.hidden_classes:
-                self.on_status("目前繪製類別已隱藏，請在「本張標註」取消隱藏，或選擇其他類別")
-                return
             if self.tool == "box":
                 self._before = copy.deepcopy(self.annotations)
                 self._drag = ("box", point, point)
@@ -231,7 +231,26 @@ class AnnotationCanvas(tk.Canvas):
                     if handle in {4, 5, 6}:
                         y2 = max(point[1], y1 + 1 / self.source.height)
                     annotation.points = [(max(0, x1), max(0, y1)), (min(1, x2), min(1, y2))]
-        self.redraw()
+        if mode == "pan":
+            self.redraw()
+        elif mode == "box":
+            self._draw_preview()
+        else:
+            self._position_selected()
+
+    def _position_selected(self):
+        if self._selected_items is None:
+            return
+        shape, label, background, handles = self._selected_items
+        annotation = self.annotations[self.selected]
+        self.coords(shape, *[v for point in annotation.points for v in self.screen(point)])
+        if label is not None:
+            x, y = self.screen(annotation.bounds()[:2])
+            self.coords(label, x, y - 4)
+            self.coords(background, *self.bbox(label))
+        for item, point in zip(handles, self._handles(annotation)):
+            x, y = self.screen(point)
+            self.coords(item, x - 4, y - 4, x + 4, y + 4)
 
     def _release(self, _event=None):
         if not self._drag:
@@ -244,7 +263,7 @@ class AnnotationCanvas(tk.Canvas):
                     (min(first[0], last[0]), min(first[1], last[1])),
                     (max(first[0], last[0]), max(first[1], last[1])),
                 ]))
-                self.selected = len(self.annotations) - 1 if self.current_class not in self.locked_classes else -1
+                self.selected = len(self.annotations) - 1
         before = self._before
         self._drag, self._before = None, None
         if mode != "pan" and before is not None and before != self.annotations:
@@ -263,7 +282,7 @@ class AnnotationCanvas(tk.Canvas):
     def _hover(self, event):
         if self.source and self._polygon:
             self._preview = self.normalized(event.x, event.y)
-            self.redraw()
+            self._draw_preview()
 
     def finish_polygon(self):
         if len(self._polygon) < 3:
@@ -279,7 +298,7 @@ class AnnotationCanvas(tk.Canvas):
             self.on_status("多邊形面積為 0，請重新選取頂點")
             return
         self.annotations.append(annotation)
-        self.selected = len(self.annotations) - 1 if self.current_class not in self.locked_classes else -1
+        self.selected = len(self.annotations) - 1
         self._polygon, self._preview = [], None
         self.on_change(before)
         self.on_select(self.selected)
@@ -291,8 +310,32 @@ class AnnotationCanvas(tk.Canvas):
         self._polygon, self._preview, self._drag, self._before = [], None, None, None
         self.redraw()
 
+    def set_hovered(self, index: int):
+        self.hovered = index
+        self._draw_hover()
+
+    def _draw_hover(self):
+        self.delete("object-hover")
+        if not self.source or not self.show_annotations or not 0 <= self.hovered < len(self.annotations):
+            return
+        annotation = self.annotations[self.hovered]
+        coords = [v for point in annotation.points for v in self.screen(point)]
+        draw = self.create_rectangle if annotation.kind == "box" else self.create_polygon
+        tags = ("annotation", "object-hover")
+        ink, gold = "#262015", "#ffdf49"
+        draw(*coords, outline=ink, fill="", width=7, tags=tags)
+        dash = (7, 4) if annotation.edit_id in self.hidden_ids else ()
+        draw(*coords, outline=gold, fill="", width=3, dash=dash, tags=tags)
+
+        x, y = self.screen(annotation.bounds()[:2])
+        label = self.create_text(x + 5, y + 4, text=f"#{self.hovered + 1}", anchor="nw",
+                                 fill=ink, font=("Segoe UI", 11, "bold"), tags=tags)
+        background = self.create_rectangle(*self.bbox(label), fill=gold, outline=ink, tags=tags)
+        self.tag_raise(label, background)
+
     def redraw(self):
         width, height = self.winfo_width(), self.winfo_height()
+        self._selected_items = None
         self.delete("annotation")
         self.delete("empty")
         if not self.source:
@@ -320,15 +363,16 @@ class AnnotationCanvas(tk.Canvas):
         if not self.show_annotations:
             return
         for index, annotation in enumerate(self.annotations):
-            if annotation.class_id in self.hidden_classes:
+            if annotation.edit_id in self.hidden_ids:
                 continue
             color = COLORS[annotation.class_id % len(COLORS)]
             selected = index == self.selected
             points = [self.screen(point) for point in annotation.points]
             if annotation.kind == "box":
-                self.create_rectangle(*points[0], *points[1], outline=color, width=3 if selected else 2, tags="annotation")
+                shape = self.create_rectangle(*points[0], *points[1], outline=color, width=3 if selected else 2, tags="annotation")
             else:
-                self.create_polygon(*[v for p in points for v in p], outline=color, fill="", width=3 if selected else 2, tags="annotation")
+                shape = self.create_polygon(*[v for p in points for v in p], outline=color, fill="", width=3 if selected else 2, tags="annotation")
+            label = background = None
             if self.show_labels:
                 x, y = self.screen(annotation.bounds()[:2])
                 text = f" {index + 1} · {self.names.get(annotation.class_id, f'class_{annotation.class_id}')} "
@@ -337,16 +381,27 @@ class AnnotationCanvas(tk.Canvas):
                 background = self.create_rectangle(*bbox, fill=color, outline="", tags="annotation")
                 self.tag_raise(label, background)
             if selected:
+                handles = []
                 for point in self._handles(annotation):
                     x, y = self.screen(point)
-                    self.create_rectangle(x - 4, y - 4, x + 4, y + 4, fill="#f5f8ff", outline=color, width=2, tags="annotation")
+                    handles.append(self.create_rectangle(x - 4, y - 4, x + 4, y + 4, fill="#f5f8ff", outline=color,
+                                                         width=2, tags="annotation"))
+                self._selected_items = shape, label, background, handles
+        self._draw_preview()
+        self._draw_hover()
+
+    def _draw_preview(self):
+        self.delete("draw-preview")
+        if not self.show_annotations:
+            return
+        tags = ("annotation", "draw-preview")
         if self._drag and self._drag[0] == "box":
-            self.create_rectangle(*self.screen(self._drag[1]), *self.screen(self._drag[2]), outline=COLORS[self.current_class % len(COLORS)], width=2, dash=(5, 3), tags="annotation")
+            self.create_rectangle(*self.screen(self._drag[1]), *self.screen(self._drag[2]), outline=COLORS[self.current_class % len(COLORS)], width=2, dash=(5, 3), tags=tags)
         if self._polygon:
             points = self._polygon + ([self._preview] if self._preview else [])
             coords = [value for point in points for value in self.screen(point)]
             if len(coords) >= 4:
-                self.create_line(*coords, fill=COLORS[self.current_class % len(COLORS)], width=2, dash=(5, 3), tags="annotation")
+                self.create_line(*coords, fill=COLORS[self.current_class % len(COLORS)], width=2, dash=(5, 3), tags=tags)
             for point in self._polygon:
                 x, y = self.screen(point)
-                self.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#45d6b0", outline="#ffffff", tags="annotation")
+                self.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#45d6b0", outline="#ffffff", tags=tags)

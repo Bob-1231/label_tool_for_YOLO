@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from tkinter import font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -50,6 +51,7 @@ class YoloDesk(tk.Tk):
         self._messages = queue.Queue()
         self._search_timer = None
         self._refreshing_objects = False
+        self._hover_sync = None
         self._class_ids: list[int] = []
         self._style()
         self._build()
@@ -121,6 +123,26 @@ class YoloDesk(tk.Tk):
                         relief="flat", font=("Microsoft JhengHei UI", 10, "bold"))
         style.map("Treeview.Heading", background=[("active", "#ccdbee")])
         style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "#ffffff")])
+        self._object_font = tkfont.Font(self, family="Microsoft JhengHei UI", size=14)
+        row_height = max(36, self._object_font.metrics("linespace") + 8)
+        style.configure("Objects.Treeview", font=self._object_font, rowheight=row_height)
+        self._grid_widths = ()
+        self._grid_sync = None
+        self._row_grid = tk.PhotoImage(width=256, height=row_height)
+        style.element_create("ObjectRow.rules", "image", self._row_grid, width=1, height=1)
+        style.layout("Objects.Treeview.Row", style.layout("Treeview.Row") + [
+            ("ObjectRow.rules", {"sticky": "nsew"})
+        ])
+        self._heading_rule = tk.PhotoImage(width=64, height=64)
+        self._heading_rule.put(BORDER, to=(0, 0, 64, 64))
+        style.element_create("ObjectHeading.rule", "image", self._heading_rule, width=1, height=1)
+        style.layout("Objects.Treeview.Heading", [
+            ("Treeheading.cell", {"sticky": "nsew"}),
+            ("ObjectHeading.rule", {"side": "bottom", "sticky": "ew"}),
+            ("ObjectHeading.rule", {"side": "right", "sticky": "ns"}),
+            ("Treeheading.padding", {"sticky": "nsew", "children": [("Treeheading.text", {"sticky": "we"})]})
+        ])
+        style.configure("Objects.Treeview.Heading", padding=(2, 5))
         style.configure("TCheckbutton", background=PANEL, foreground=TEXT, padding=4, indicatorbackground=PANEL)
         style.map("TCheckbutton", background=[("active", PANEL)])
         style.configure("Save.TCheckbutton", background=SAVE_BG, foreground="#244f3e")
@@ -225,7 +247,8 @@ class YoloDesk(tk.Tk):
         self._heading(right, "本張標註", "OBJECTS", color="#147a69", background="#e2f3ee")
         object_frame = tk.Frame(right, background=PANEL)
         object_frame.pack(fill="both", expand=True, padx=10)
-        self.object_tree = ttk.Treeview(object_frame, columns=("id", "name", "locked", "hidden"), show="headings", selectmode="browse", height=6)
+        self.object_tree = ttk.Treeview(object_frame, columns=("id", "name", "locked", "hidden"),
+                                        show="headings", selectmode="browse", style="Objects.Treeview", height=6)
         self.object_tree.heading("id", text="#")
         self.object_tree.heading("name", text="類別")
         self.object_tree.column("id", width=28, minwidth=24, stretch=False, anchor="center")
@@ -234,11 +257,21 @@ class YoloDesk(tk.Tk):
             self.object_tree.heading(column, text=title)
             self.object_tree.column(column, width=46, minwidth=46, stretch=False, anchor="center")
         object_scroll = ttk.Scrollbar(object_frame, orient="vertical", command=self.object_tree.yview)
-        self.object_tree.configure(yscrollcommand=object_scroll.set)
+        def object_scrolled(first, last):
+            object_scroll.set(first, last)
+            self._queue_object_hover()
+
+        self.object_tree.configure(yscrollcommand=object_scrolled)
         self.object_tree.pack(side="left", fill="both", expand=True)
         object_scroll.pack(side="right", fill="y")
         self.object_tree.bind("<<TreeviewSelect>>", self._object_selected)
         self.object_tree.bind("<Button-1>", self._object_control_clicked)
+        self.object_tree.bind("<Motion>", lambda e: self._hover_at(e.x, e.y))
+        self.object_tree.bind("<Leave>", lambda _e: self._set_object_hover(-1))
+        self.object_tree.bind("<Configure>", self._object_table_resized)
+        self.object_tree.bind("<B1-Motion>", self._queue_object_grid, add="+")
+        self.object_tree.bind("<ButtonRelease-1>", self._queue_object_grid, add="+")
+        self.object_tree.tag_configure("hover", background="#c6efe4")
         self.object_tree.tag_configure("row-even", background="#ffffff")
         self.object_tree.tag_configure("row-odd", background="#f0f5fc")
         object_actions = tk.Frame(right, background=PANEL)
@@ -756,11 +789,67 @@ class YoloDesk(tk.Tk):
             return
         before = copy.deepcopy(self.canvas.annotations)
         self.canvas.annotations[self.canvas.selected].class_id = self.canvas.current_class
-        if not self.canvas.can_select(self.canvas.selected):
-            self.canvas.selected = -1
         if before != self.canvas.annotations:
             self._changed(before)
             self.canvas.redraw()
+
+    def _object_table_resized(self, event):
+        self._queue_object_grid(event)
+        self._queue_object_hover()
+
+    def _queue_object_grid(self, _event):
+        # Read widths after Tk's native column-resize binding has run.
+        if self._grid_sync is None:
+            self._grid_sync = self.after_idle(self._sync_object_grid)
+
+    def _sync_object_grid(self):
+        self._grid_sync = None
+        tree = self.object_tree
+        widths = tuple(tree.column(column, "width") for column in tree["columns"])
+        if widths == self._grid_widths:
+            return
+        self._grid_widths = widths
+        width = sum(widths)
+        height = self._row_grid.height()
+        self._row_grid.configure(width=width)
+        self._row_grid.blank()
+        self._row_grid.put(BORDER, to=(0, height - 1, width, height))
+        right = 0
+        for column_width in widths:
+            right += column_width
+            self._row_grid.put(BORDER, to=(right - 1, 0, right, height))
+
+    def _hover_at(self, x, y):
+        tree = self.object_tree
+        row = tree.identify_row(y) if tree.identify_region(x, y) == "cell" else ""
+        self._set_object_hover(int(row) if row else -1)
+
+    def _set_object_hover(self, index):
+        previous = self.canvas.hovered
+        if previous == index:
+            return
+        tree = self.object_tree
+        if previous >= 0 and tree.exists(str(previous)):
+            tags = tree.item(str(previous), "tags")
+            tree.item(str(previous), tags=tuple(tag for tag in tags if tag != "hover"))
+        if index >= 0:
+            tags = tree.item(str(index), "tags")
+            tree.item(str(index), tags=("hover", *tags))
+        self.canvas.set_hovered(index)
+
+    def _queue_object_hover(self):
+        # Scrolling and list rebuilds can move another row under a stationary pointer.
+        if self._hover_sync is None:
+            self._hover_sync = self.after_idle(self._sync_object_hover)
+
+    def _sync_object_hover(self):
+        self._hover_sync = None
+        tree = self.object_tree
+        x, y = tree.winfo_pointerxy()
+        if tree.winfo_containing(x, y) == tree:
+            self._hover_at(x - tree.winfo_rootx(), y - tree.winfo_rooty())
+        else:
+            self._set_object_hover(-1)
 
     def _object_control_clicked(self, event):
         tree = self.object_tree
@@ -772,22 +861,19 @@ class YoloDesk(tk.Tk):
             return
         if self.busy or self.canvas._drag or self.canvas._polygon:
             return "break"
-        class_id = self.canvas.annotations[int(row)].class_id
-        classes = self.canvas.locked_classes if column == "#3" else self.canvas.hidden_classes
-        classes.symmetric_difference_update({class_id})
-        if not self.canvas.can_select(self.canvas.selected):
+        index = int(row)
+        edit_id = self.canvas.annotations[index].edit_id
+        active_ids = self.canvas.locked_ids if column == "#3" else self.canvas.hidden_ids
+        active_ids.symmetric_difference_update({edit_id})
+        tree.set(row, column, "☑" if edit_id in active_ids else "☐")
+        if index == self.canvas.selected and not self.canvas.can_select(index):
             self.canvas.selected = -1
-        for i, annotation in enumerate(self.canvas.annotations):
-            if annotation.class_id == class_id:
-                tree.set(str(i), column, "☑" if class_id in classes else "☐")
-        self._selected(self.canvas.selected)
+            self._selected(-1)
         self.canvas.redraw()
         return "break"
 
     def refresh_objects(self):
-        present = {annotation.class_id for annotation in self.canvas.annotations}
-        self.canvas.locked_classes.intersection_update(present)
-        self.canvas.hidden_classes.intersection_update(present)
+        self._set_object_hover(-1)
         self._refreshing_objects = True
         items = self.object_tree.get_children()
         if items:
@@ -797,12 +883,13 @@ class YoloDesk(tk.Tk):
             tag = f"class{annotation.class_id}"
             self.object_tree.tag_configure(tag, foreground=LIST_COLORS[annotation.class_id % len(LIST_COLORS)])
             row_tag = "row-even" if i % 2 == 0 else "row-odd"
-            locked = "☑" if annotation.class_id in self.canvas.locked_classes else "☐"
-            hidden = "☑" if annotation.class_id in self.canvas.hidden_classes else "☐"
+            locked = "☑" if annotation.edit_id in self.canvas.locked_ids else "☐"
+            hidden = "☑" if annotation.edit_id in self.canvas.hidden_ids else "☐"
             self.object_tree.insert("", "end", iid=str(i), values=(i + 1, f"{annotation.class_id} · {name}", locked, hidden),
                                     tags=(row_tag, tag))
         self._refreshing_objects = False
         self._selected(self.canvas.selected)
+        self._queue_object_hover()
 
     def _selected(self, index):
         if 0 <= index < len(self.canvas.annotations):
@@ -919,7 +1006,8 @@ class YoloDesk(tk.Tk):
             "B：畫框；V：選取；拖曳框：移動；拖曳角點/邊點：調整大小。\n"
             "矩形框模式下點擊既有框內部，會自動切換選取並可直接拖曳調整。\n"
             "在「本張標註」勾選「固定」可保留框線並穿過它畫框，勾選「隱藏」可收起框線和名稱。\n"
-            "兩個開關各自套用到本張同類別的所有物件，再點一次即可解除。切換圖片或重新載入會重設。\n"
+            "游標移到清單某一列時，圖片會以黃色外框和編號標示該物件。\n"
+            "每列只控制該物件，再點一次即可解除。切換圖片或重新載入會重設。\n"
             "A / D 或左右鍵：上一張 / 下一張；F：圖片適合視窗。\n"
             "滾輪：以游標為中心縮放；右鍵 / 中鍵 / 空白鍵＋拖曳：平移。\n"
             "1–9：依列表順序選擇前九個類別；已有選取框時直接修改該框類別，可復原。\n"

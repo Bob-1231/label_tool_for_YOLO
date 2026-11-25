@@ -7,8 +7,9 @@ import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import count
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +18,7 @@ import yaml
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 SPLITS = {"train", "val", "valid", "validation", "test"}
 MAX_CLASS_ID = 9999
+_annotation_ids = count()
 
 
 @dataclass(eq=True)
@@ -24,6 +26,8 @@ class Annotation:
     class_id: int
     kind: str
     points: list[tuple[float, float]]
+    # Keep the same identity when an undo snapshot copies the geometry.
+    edit_id: int = field(default_factory=_annotation_ids.__next__, init=False, compare=False, repr=False)
 
     def bounds(self) -> tuple[float, float, float, float]:
         xs, ys = zip(*self.points)
