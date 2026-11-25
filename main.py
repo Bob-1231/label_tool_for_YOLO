@@ -1,6 +1,5 @@
 """Run with an environment containing Pillow and PyYAML."""
 from __future__ import annotations
-
 import argparse
 import ctypes
 import sys

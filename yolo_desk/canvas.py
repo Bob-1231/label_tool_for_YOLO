@@ -1,13 +1,10 @@
 """Image-space annotation editing with cursor-centered zoom and bounded dragging."""
 from __future__ import annotations
-
 import copy
 import math
 import tkinter as tk
 from typing import Callable
-
 from PIL import Image, ImageTk
-
 from .dataset import Annotation
 
 COLORS = ["#45d6b0", "#70a7ff", "#ffbe69", "#dd91ff", "#ff7f96", "#62d8ef", "#c9dd72", "#c2a590"]

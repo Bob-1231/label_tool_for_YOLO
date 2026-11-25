@@ -1,6 +1,5 @@
 """YOLO discovery, loss-aware parsing, conflict detection and atomic persistence."""
 from __future__ import annotations
-
 import hashlib
 import math
 import os
@@ -12,7 +11,6 @@ from datetime import datetime
 from itertools import count
 from pathlib import Path
 from typing import Callable
-
 import yaml
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}

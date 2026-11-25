@@ -1,6 +1,5 @@
 """Traditional Chinese desktop interface for YOLO datasets."""
 from __future__ import annotations
-
 import copy
 import json
 import os
@@ -12,9 +11,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
-
 from PIL import Image, ImageOps, UnidentifiedImageError
-
 from .canvas import AnnotationCanvas
 from .dataset import Annotation, Dataset, MAX_CLASS_ID, atomic_write
 
@@ -623,6 +620,9 @@ class YoloDesk(tk.Tk):
             return False
         self.saved_annotations = copy.deepcopy(self.canvas.annotations)
         self.names_dirty = False
+        self.canvas.hidden_ids.clear()
+        self.canvas.selected = -1
+        self.refresh_objects()
         self._refresh_current_row()
         self._update_dirty()
         self.canvas.fit()
